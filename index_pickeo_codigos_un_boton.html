@@ -1,0 +1,277 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Pickeo por Códigos</title>
+  <style>
+    :root { --primary:#2a7de1; --danger:#d9534f; --success:#28a745; --light:#f9f9f9; --gray:#ccc; }
+    body { font-family: 'Segoe UI', Tahoma, sans-serif; background: var(--light); padding: 40px 20px; }
+    .container { background:#fff; padding:24px; border-radius:12px; max-width: 1100px; margin:auto; box-shadow:0 4px 12px rgba(0,0,0,.08); }
+    h1 { margin:0 0 12px; font-size:22px; }
+    .row { display:grid; grid-template-columns: repeat(2,1fr); gap:12px; }
+    label { font-weight:600; margin-top:10px; display:block; }
+    select, input[type="text"] { width:100%; padding:12px; font-size:16px; border:1px solid var(--gray); border-radius:8px; box-sizing:border-box; }
+    .scan { display:grid; grid-template-columns: 1fr 220px; gap:10px; margin:14px 0; }
+    button { background: var(--primary); color:#fff; border:0; padding:12px; border-radius:8px; cursor:pointer; font-size:16px; }
+    button:hover { filter: brightness(.95); }
+    button.secondary { background:#6c757d; }
+    button.danger { background:var(--danger); }
+    .grid { width:100%; border-collapse: collapse; margin-top:8px; }
+    .grid th, .grid td { border:1px solid #e6e6e6; padding:8px; text-align:left; }
+    .grid th { background:#fafafa; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; color:#fff; }
+    .ok { background: var(--success); }
+    .no { background: var(--danger); }
+    .stats { display:flex; gap:16px; margin:10px 0; flex-wrap:wrap; }
+    .stat { background:#fafafa; border:1px solid #eee; border-radius:8px; padding:8px 12px; }
+    .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+    .last { background:#eefaf0; border:1px solid #cfead6; padding:10px 12px; border-radius:8px; margin:10px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    @media (max-width: 900px) { .row { grid-template-columns:1fr; } .scan { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Pickeo por Códigos</h1>
+
+    <div class="row">
+      <div>
+        <label for="origen">Sucursal Origen</label>
+        <select id="origen">
+          <option>AVELLANEDA 2</option>
+          <option>NAZCA</option>
+          <option>LAMARCA</option>
+        </select>
+      </div>
+      <div>
+        <label for="destino">Sucursal Destino</label>
+        <select id="destino">
+          <option>AVELLANEDA 2</option>
+          <option>NAZCA</option>
+          <option>LAMARCA</option>
+        </select>
+      </div>
+      <div>
+        <label for="responsable">Responsable (según Origen)</label>
+        <select id="responsable"></select>
+      </div>
+      <div>
+        <label for="remito">N° de Remito</label>
+        <input type="text" id="remito" placeholder="Ej: 0001-00012345">
+      </div>
+    </div>
+
+    <div class="last" id="ultimo" style="display:none;"></div>
+
+    <label for="codigo">Código de barras (escaneá o escribí y presioná Enter):</label>
+    <div class="scan">
+      <input type="text" id="codigo" placeholder="Escaneá o escribí y Enter">
+      <div style="display:flex; gap:8px;">
+        <button id="btnDeshacer" class="secondary" title="Eliminar el último ítem">Deshacer</button>
+        <button id="btnVaciar" class="danger" title="Vaciar la lista">Vaciar</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">Total escaneados: <b id="totalEscaneados">0</b></div>
+      <div class="stat">Válidos: <b id="totalValidos">0</b></div>
+      <div class="stat">Inválidos: <b id="totalInvalidos">0</b></div>
+    </div>
+
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Cantidad</th>
+          <th>Artículo</th>
+          <th>Color</th>
+          <th>Talle</th>
+          <th>Estado</th>
+        </tr>
+      </thead>
+      <tbody id="tabla"></tbody>
+    </table>
+
+    <div class="actions">
+      <button id="descargarAmbos">Descargar TXT</button>
+    </div>
+  </div>
+
+  <script>
+    // ==== Config Responsables por Origen (editá aquí tus nombres reales) ====
+    const responsablesPorSucursal = {
+      "AVELLANEDA 2": ["Responsable A", "Responsable B"],
+      "NAZCA": ["Responsable C", "Responsable D"],
+      "LAMARCA": ["Responsable E", "Responsable F"]
+    };
+
+    // ==== Estado ====
+    let validSet = new Set();      // códigos válidos del CSV
+    let detalles = {};             // codigo -> { articulo, color, talle }
+    let conteo = new Map();        // código válido -> cantidad
+    let invalidos = new Map();     // código inválido -> cantidad
+    let historial = [];            // pila para deshacer
+
+    // ==== Utilidades ====
+    const safe = s => (s||'').toString().replace(/\s+/g,'_').replace(/[^\w\-]/g,'');
+    const hoy = () => new Date().toISOString().split('T')[0];
+
+    // Parser CSV robusto (soporta ; o , y comillas, y BOM)
+    function splitCSV(line, sep) {
+      line = line.replace(/^\uFEFF/, ''); // BOM
+      const out = []; let cur=''; let inQ=false;
+      for (let i=0;i<line.length;i++) {
+        const ch = line[i];
+        if (ch === '"') { inQ = !inQ; continue; }
+        if (ch === sep && !inQ) { out.push(cur.trim()); cur=''; }
+        else { cur += ch; }
+      }
+      out.push(cur.trim()); return out;
+    }
+    function parseCSV(text) {
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (!lines.length) return {rows:[],sep:';'};
+      const first = lines[0];
+      const sep = first.includes(';') ? ';' : ',';
+      const rows = [];
+      for (let i=0;i<lines.length;i++) {
+        const cols = splitCSV(lines[i], sep).map(c => c.replace(/^"|"$/g,'').trim());
+        rows.push(cols);
+      }
+      return { rows, sep };
+    }
+
+    // ==== Cargar CSV (sin mostrar mensajes) ====
+    fetch('equivalencias.csv')
+      .then(r => r.text())
+      .then(text => {
+        const {rows} = parseCSV(text);
+        for (let i=1;i<rows.length;i++) {
+          const c = (rows[i][0]||'').replace(/"/g,'');
+          const a = (rows[i][1]||'').replace(/"/g,'');
+          const col = (rows[i][2]||'').replace(/"/g,'');
+          const t = (rows[i][3]||'').replace(/"/g,'');
+          if (c) {
+            validSet.add(c);
+            if (!(c in detalles)) { detalles[c] = { articulo:a||'-', color:col||'-', talle:t||'-' }; }
+          }
+        }
+      })
+      .catch(_ => { /* silencioso */ });
+
+    // ==== Iniciales ====
+    const origenSel = document.getElementById('origen');
+    const responsableSel = document.getElementById('responsable');
+
+    function cargarResponsables() {
+      const origen = origenSel.value;
+      const lista = responsablesPorSucursal[origen] || [];
+      responsableSel.innerHTML = '';
+      lista.forEach(n => { const opt = document.createElement('option'); opt.value = n; opt.textContent = n; responsableSel.appendChild(opt); });
+    }
+    origenSel.addEventListener('change', cargarResponsables);
+    cargarResponsables();
+
+    // ==== Entrada códigos ====
+    const inputCodigo = document.getElementById('codigo');
+    const ultimoBox = document.getElementById('ultimo');
+    inputCodigo.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const code = inputCodigo.value.trim();
+        if (!code) return;
+        historial.push(code);
+        if (validSet.has(code)) {
+          conteo.set(code, (conteo.get(code)||0)+1);
+          const d = detalles[code] || {articulo:'-',color:'-',talle:'-'};
+          ultimoBox.style.display = 'block';
+          ultimoBox.innerHTML = `Último OK → <b>${code}</b> · Artículo: <b>${d.articulo}</b> · Color: <b>${d.color}</b> · Talle: <b>${d.talle}</b>`;
+        } else {
+          invalidos.set(code, (invalidos.get(code)||0)+1);
+          ultimoBox.style.display = 'block';
+          ultimoBox.innerHTML = `Último <span class="badge no">NO EXISTE EQUIVALENCIA</span> → <b>${code}</b>`;
+        }
+        inputCodigo.value='';
+        render();
+      }
+    });
+
+    // ==== Render grid y stats ====
+    function render() {
+      const tbody = document.getElementById('tabla');
+      tbody.innerHTML = '';
+
+      // Válidos primero
+      Array.from(conteo.keys()).sort().forEach(code => {
+        const d = detalles[code] || {articulo:'-',color:'-',talle:'-'};
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><code>'+code+'</code></td>' +
+                       '<td>'+conteo.get(code)+'</td>' +
+                       '<td>'+d.articulo+'</td>' +
+                       '<td>'+d.color+'</td>' +
+                       '<td>'+d.talle+'</td>' +
+                       '<td><span class="badge ok">OK</span></td>';
+        tbody.appendChild(tr);
+      });
+      // Inválidos
+      Array.from(invalidos.keys()).sort().forEach(code => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><code>'+code+'</code></td>' +
+                       '<td>'+invalidos.get(code)+'</td>' +
+                       '<td>-</td><td>-</td><td>-</td>' +
+                       '<td><span class="badge no">NO EXISTE EQUIVALENCIA</span></td>';
+        tbody.appendChild(tr);
+      });
+
+      // Stats
+      const totalEsc = historial.length;
+      let totalVal = 0; conteo.forEach(v => totalVal += v);
+      let totalInv = 0; invalidos.forEach(v => totalInv += v);
+      document.getElementById('totalEscaneados').textContent = totalEsc;
+      document.getElementById('totalValidos').textContent = totalVal;
+      document.getElementById('totalInvalidos').textContent = totalInv;
+    }
+
+    // ==== Botones auxiliares ====
+    document.getElementById('btnDeshacer').addEventListener('click', () => {
+      const last = historial.pop();
+      if (!last) return;
+      if (conteo.has(last)) {
+        const c = conteo.get(last)-1;
+        if (c<=0) conteo.delete(last); else conteo.set(last,c);
+      } else if (invalidos.has(last)) {
+        const c = invalidos.get(last)-1;
+        if (c<=0) invalidos.delete(last); else invalidos.set(last,c);
+      }
+      render();
+    });
+    document.getElementById('btnVaciar').addEventListener('click', () => {
+      if (!confirm('¿Vaciar todo?')) return;
+      conteo.clear(); invalidos.clear(); historial = []; document.getElementById('ultimo').style.display='none'; render();
+    });
+
+    // ==== Descarga ambos TXT en un solo click ====
+    document.getElementById('descargarAmbos').addEventListener('click', () => {
+      const origen = document.getElementById('origen').value;
+      const destino = document.getElementById('destino').value;
+      const responsable = document.getElementById('responsable').value || 'SIN_RESPONSABLE';
+      const remito = (document.getElementById('remito').value || 'SIN_REMITO');
+      const fecha = hoy();
+      const baseNombre = `pickeo_${safe(origen)}_a_${safe(destino)}_${safe(remito)}_${safe(responsable)}_${fecha}`;
+
+      // Válidos
+      const lineasValidos = [];
+      conteo.forEach((cant, code) => { for (let i=0;i<cant;i++) lineasValidos.push(code); });
+      const blobV = new Blob([lineasValidos.join('\n')], {type:'text/plain;charset=utf-8'});
+      const aV = document.createElement('a'); aV.href = URL.createObjectURL(blobV); aV.download = baseNombre + '_VALIDOS.txt'; aV.click();
+
+      // Inválidos
+      const lineasInv = [];
+      invalidos.forEach((cant, code) => { for (let i=0;i<cant;i++) lineasInv.push('NO EXISTE EQUIVALENCIA: ' + code); });
+      const blobI = new Blob([lineasInv.join('\n')], {type:'text/plain;charset=utf-8'});
+      const aI = document.createElement('a'); aI.href = URL.createObjectURL(blobI); aI.download = baseNombre + '_INVALIDOS.txt'; aI.click();
+    });
+  </script>
+</body>
+</html>
